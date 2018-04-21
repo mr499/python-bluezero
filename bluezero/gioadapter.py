@@ -1,30 +1,45 @@
-"""DBus Adapter with GDBus"""
+"""DBus Adapter with GDBus."""
 from collections import namedtuple
 
 from gi.repository import GObject, Gio, GLib
 from bluezero import constants
+from bluezero import dbus_tools
+import pdb
+
 
 # Use this as a mixin (should mixins have __init__?)
 class EventLoop:
     """Mixin for abstracting the event loop."""
+
     def __init__(self):
+        """Initialise a handle to the GObject MainLoop."""
         self.mainloop = GObject.MainLoop()
 
     def run(self):
+        """Run the GObject MainLoop."""
         self.mainloop.run()
 
     def quit(self):
+        """Stop the GObject MainLoop."""
         self.mainloop.quit()
 
+    @property
     def is_running(self):
-        self.mainloop.is_running()
+        """Run the GObject MainLoop."""
+        return self.mainloop.is_running()
 
-    def add_timer(self, time, callback):
+    def add_timer_cb(self, time, callback):
+        """Add a timer callback to the GObject Mainloop.
+
+        :param time: time between callbacks.
+        :param callback: function called at "time" intervals.
+        """
         GObject.timeout_add(time, callback)
 
 
 class AdapterError(Exception):
     """Generic Exception for Adapter Errors."""
+
     pass
 
 
@@ -39,58 +54,69 @@ DBusProp.__new__.__defaults__ = (None, None)
 
 class DBusAccess(object):
     """Mixin for abstracting specific DBus access library."""
+
     def get_system_bus(self):
+        """Return a handle to the system bus."""
         return Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
 
     def get_objectmanager(self, bus, name, path):
+        """Return a handle to an Object Manager.
+
+        :param bus: handle to the DBus bus.
+        :param name: Service name, e.g. org.bluez.
+        :param path: Path that the Object Manager sits on.
+        """
         return Gio.DBusObjectManagerClient.new_sync(
             bus, Gio.DBusObjectManagerClientFlags.NONE,
             name=name, object_path=path)
 
     def get_managedobjects(self, omhandle):
+        """Return the managed objects.
+
+        :param omhandle: handle to the Object Manager
+        """
         return omhandle.get_objects()
 
     def get_interface(self, bus, service, path, iface):
+        """Return a DBus interface handle.
+
+        :param bus: Handle to the DBus bus.
+        :param service: Name of the service serving the interface.
+        :param path: Path to the interface.
+        :param iface: Interface name.
+        """
         return Gio.DBusProxy.new_sync(
             bus, Gio.DBusProxyFlags.NONE, None,
             service, path, iface, None)
 
     def get_prop(self, handle, iface, name):
+        """Get a DBus Property.
+
+        :param handle: Handle to the DBus interface.
+        :param iface: Name of the Dbus interface.
+        :param name: Name of the property to get.
+        """
         return handle.Get('(ss)', iface, name)
 
     def set_prop(self, handle, iface, name, value, sig):
+        """Set a DBus Property.
+
+        :param handle: Handle to the DBus interface.
+        :param iface: Name of the Dbus interface.
+        :param name: Name of the property to set.
+        :param value: Value to set.
+        :param sig: DBus signature of the value to set.
+        """
         return handle.Set(
             '(ssv)', iface, name, GLib.Variant(sig, value))
-
-
-def interfaces_added(self, path, interfaces):
-    if constants.DEVICE_INTERFACE in interfaces:
-        print('Path {0}: Interfaces added - {1}'.format(path, interfaces))
-
-
-def properties_changed(self, interface, changed, invalidated, path):
-    """
-    Properties Changed Callback.
-
-    :param interface:
-    :param changed:
-    :param invalidated:
-    :param path:
-    :return:
-    """
-    if constants.DEVICE_INTERFACE in interface:
-        for prop in changed:
-            print('{}:{} Property {} new value {}'.format(
-                  interface, path, prop, changed[prop]))
 
 
 class DBusBluez(DBusAccess):
     """Representation of a Bluez DBus Object.
 
     Provides common functionality for DBus Objects.
-    An alternative approach would be to restructure as a mixin.
-
     """
+
     _props = None  # Must initialise for get/set attr to work
 
     def __init__(self, path, iface=None, props=None):
@@ -102,6 +128,9 @@ class DBusBluez(DBusAccess):
                       how to relate a python property name
                       to that found on DBus.
         """
+        if path is None:
+            raise ValueError('DBusBluez Error: Path is empty')
+
         self.path = path
         self.iface = iface
         self._props = props
@@ -157,6 +186,7 @@ class DBusBluez(DBusAccess):
         return self.get_managedobjects(self._omclient)
 
     def __getattr__(self, name):
+        """Overload attribute get to get dynamic properties."""
         # check whether to get the property from DBus or the class object
         if self._props is not None and name in self._props.keys():
             # Doesn't work without an interface to ask on
@@ -175,6 +205,7 @@ class DBusBluez(DBusAccess):
             return super().__getattribute__(name)
 
     def __setattr__(self, name, value):
+        """Overload attribute set to get dynamic properties."""
         # check whether to set the property on the DBus or in the class object
         if self._props is not None and name in self._props.keys():
             # Doesn't work without an interface to set on
@@ -194,14 +225,14 @@ class DBusBluez(DBusAccess):
             super().__setattr__(name, value)
 
     def __dir__(self):
-        # Give DBus property names as well
+        """Overload class dir to include dynamic properties."""
         if self._props is not None:
             return super().__dir__() + list(self._props.keys())
         else:
             return super().__dir__()
 
     def __repr__(self):
-        # Print the class and properties
+        """Overload class repr to include dynamic properties."""
         if self._props is not None:
             plist = self._props.keys()
             pval = self.__getattr__
@@ -213,9 +244,27 @@ class DBusBluez(DBusAccess):
 
 
 class DBusAdapter(DBusBluez, EventLoop):
-    """Representation of a Bluetooth Adapter."""
+    """Bluetooth Adapter Class.
 
-    def __init__(self, path):
+    This class instantiates an object that interacts with the physical
+    Bluetooth device.
+
+    :Example:
+
+    >>> from bluezero import adapter
+    >>> dongle = adapter.Adapter()
+    >>> dongle.powered = True
+
+    """
+
+    def __init__(self, adapter_addr=None):
+        """Initialise the Adapter.
+
+        Creates the interface to the local Bluetooth adapter device.
+        If address is not given then first device is list is used.
+
+        :param adapter_addr: Address of Bluetooth adapter to use.
+        """
         props = {
             'address': DBusProp('Address'),
             'addresstype': DBusProp('AddressType'),
@@ -232,13 +281,23 @@ class DBusAdapter(DBusBluez, EventLoop):
             'modalias': DBusProp('Modalias')
         }
 
+        # Get an adapter
+        if adapter_addr is None:
+            adapters = list_adapters()
+            if len(adapters) > 0:
+                adapter_addr = adapters[0]
+
+        # Convert adapter address into a path
+        path = dbus_tools.get_dbus_path(adapter=adapter_addr)
+
         super(DBusAdapter, self).__init__(
             path, constants.ADAPTER_INTERFACE, props)
         EventLoop.__init__(self)
 
-        # Adapted from bluezero Adapter
-        self.omconnect('InterfacesAdded', interfaces_added)
-        self.subspropchange(constants.DEVICE_INTERFACE, properties_changed)
+        # Connect to the Object Manager
+        self.omconnect('InterfacesAdded', dbus_tools.interfaces_added)
+        self.subspropchange(
+            constants.DEVICE_INTERFACE, dbus_tools.properties_changed)
         self._nearby_timeout = 10
         self._nearby_count = 0
 
@@ -256,7 +315,7 @@ class DBusAdapter(DBusBluez, EventLoop):
         self._nearby_timeout = timeout
         self._nearby_count = 0
 
-        self.add_timer(1000, self._discovering_timeout)
+        self.add_timer_cb(1000, self._discovering_timeout)
         self._ifaceproxy.StartDiscovery()
         self.run()
 
@@ -272,8 +331,10 @@ def list_adapters():
 
     for obj in dobj.get_objects():
         for iface in obj.get_interfaces():
-            if iface.get_interface_name() == 'org.bluez.Adapter1':
-                adobj = DBusAdapter(iface.get_object_path())
+            if iface.get_interface_name() == constants.ADAPTER_INTERFACE:
+                adobj = DBusBluez(
+                    iface.get_object_path(), constants.ADAPTER_INTERFACE,
+                    {'address': DBusProp('Address')})
                 addresses.append(adobj.address)
 
     if len(addresses) < 1:
@@ -283,9 +344,21 @@ def list_adapters():
 
 
 class DBusDevice(DBusBluez, EventLoop):
-    """Representation of a Bluetooth Device."""
+    """Remote Bluetooth Device Class.
 
-    def __init__(self, path):
+    This class instantiates an object that interacts with a remote
+    Bluetooth device.
+    """
+
+    def __init__(self, adapter_addr, device_addr):
+        """Initialise the Remote Device.
+
+        Creates object for the specified remote Bluetooth device.
+        This is on the specified adapter specified.
+
+        :param adapter_addr: Address of the local Bluetooth adapter.
+        :param device_addr: Address of the remote Bluetooth device.
+        """
         props = {
             'address': DBusProp('Address'),
             'addresstype': DBusProp('AddressType'),
@@ -310,13 +383,13 @@ class DBusDevice(DBusBluez, EventLoop):
             'advertising_flags': DBusProp('AdvertisingFlags')
         }
 
+        path = dbus_tools.get_dbus_path(adapter_addr, device_addr)
         super(DBusDevice, self).__init__(
             path, constants.DEVICE_INTERFACE, props)
         EventLoop.__init__(self)
 
     def connect(self, profile=None):
-        """
-        Initiate a connection to the remote device.
+        """Connect to the remote device.
 
         :param profile: (optional) profile to use for the connection.
         """
@@ -330,10 +403,40 @@ class DBusDevice(DBusBluez, EventLoop):
         self._ifaceproxy.Disconnect()
 
 
+class DBusService(DBusBluez, EventLoop):
+    """Remote GATT Service Class.
+
+    This class instantiates an object that interacts with a remote
+    GATT Service.
+    """
+
+    def __init__(self, adapter_addr, device_addr, srv_uuid):
+        """Remote GATT Service Initialisation.
+
+        :param adapter_addr: Adapter address.
+        :param device_addr: device address.
+        :param srv_uuid: Service UUID.
+        """
+        props = {
+            'uuid': DBusProp('UUID'),
+            'device': DBusProp('Device'),
+            'primary': DBusProp('Primary'),
+        }
+
+        self.rmt_device = DBusDevice(adapter_addr, device_addr)
+        if not self.rmt_device.services_resolved:
+            raise ValueError('Services Not Resolved - Can''t Initialise')
+
+        path = dbus_tools.get_dbus_path(adapter_addr, device_addr, srv_uuid)
+        super(DBusService, self).__init__(
+            path, constants.GATT_SERVICE_IFACE, props)
+        EventLoop.__init__(self)
+
+
 if __name__ == '__main__':
     print(list_adapters())
 
-    DBA = DBusAdapter('/org/bluez/hci0')
+    DBA = DBusAdapter()
     print(DBA)
     # DBA.powered = True
     # print(DBA.powered)
@@ -351,7 +454,7 @@ if __name__ == '__main__':
     DBA.powered = True
     # DBA.nearby_discovery()
 
-    DBD = DBusDevice('/org/bluez/hci0/dev_DD_86_5F_ED_57_CE')
+    DBD = DBusDevice(DBA.address, 'DD:86:5F:ED:57:CE')
     # DBD.connect()
     print(DBD)
     print(DBD.trusted)
@@ -360,3 +463,7 @@ if __name__ == '__main__':
     DBD.trusted = False
     print(DBD.trusted)
     # DBD.disconnect()
+
+    DBS = DBusService(DBA.address, DBD.address,
+                      'E95D0753-251D-470A-A062-FA1922DFA9A8')
+    print(DBS)
